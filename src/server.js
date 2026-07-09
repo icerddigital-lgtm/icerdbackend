@@ -115,8 +115,19 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// ROUTES (Avec et sans /api pour compatibilité)
+// ROUTES
 // ============================================================
+
+// ✅ Route racine (pour le health check de Render)
+app.get('/', (_req, res) => {
+  res.json({
+    statut: 'ok',
+    service: 'ICERD API',
+    version: '1.0.0',
+    environment: process.env.NODE_ENV || 'development',
+    timestamp: new Date().toISOString()
+  });
+});
 
 // Route santé (publique)
 app.get('/api/sante', (_req, res) =>
@@ -129,7 +140,9 @@ app.get('/api/sante', (_req, res) =>
   })
 );
 
-// Routes avec /api (standard)
+// ============================================================
+// ROUTES AVEC /api (standard)
+// ============================================================
 app.use('/api/auth', authRoutes);
 app.use('/api/clients', clientsRoutes);
 app.use('/api/demandes', demandesRoutes);
@@ -156,7 +169,9 @@ app.use('/api/faq', faqRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/banque', banqueRoutes);
 
-// ✅ Routes sans /api (pour compatibilité avec les anciennes URL)
+// ============================================================
+// ROUTES SANS /api (pour compatibilité avec les anciennes URL)
+// ============================================================
 app.use('/auth', authRoutes);
 app.use('/clients', clientsRoutes);
 app.use('/demandes', demandesRoutes);
