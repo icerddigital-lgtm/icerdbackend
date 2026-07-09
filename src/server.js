@@ -45,31 +45,52 @@ import banqueRoutes from './routes/banque.js';
 const app = express();
 
 // ============================================================
-// CONFIGURATION CORS
+// CONFIGURATION CORS (Optimisée pour Render + Local)
 // ============================================================
+const isProduction = process.env.NODE_ENV === 'production';
+
+// Origines autorisées
 const allowedOrigins = [
-  process.env.CORS_ORIGIN || 'http://localhost:5173',
-  'https://icerd-platform.netlify.app',
+  // Production (Render)
+  'https://icerdbackend.onrender.com',
+  'https://icerd-backend.onrender.com',
   'https://icerd.netlify.app',
+  'https://icerd-platform.netlify.app',
+  // Développement (local)
   'http://localhost:5173',
-  'http://127.0.0.1:5173'
-];
+  'http://127.0.0.1:5173',
+  'http://localhost:4000',
+  // Variable d'environnement
+  process.env.CORS_ORIGIN
+].filter(Boolean);
+
+console.log(`📋 CORS - Origines autorisées: ${allowedOrigins.join(', ')}`);
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Permettre les requêtes sans origin (comme les apps mobiles ou les tests)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV === 'development') {
+    // Permettre les requêtes sans origin (Postman, curl, etc.)
+    if (!origin) {
+      return callback(null, true);
+    }
+    
+    // En développement, tout est permis
+    if (!isProduction) {
+      return callback(null, true);
+    }
+    
+    // En production, vérifier les origines autorisées
+    if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      console.log('🚫 CORS bloqué:', origin);
-      callback(new Error('Not allowed by CORS'));
+      console.warn(`🚫 CORS bloqué: ${origin}`);
+      callback(new Error(`CORS: ${origin} non autorisé`));
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-  exposedHeaders: ['Content-Disposition']
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  exposedHeaders: ['Content-Disposition', 'X-New-Token'],
+  maxAge: 86400 // 24 heures
 }));
 
 // ============================================================
@@ -81,21 +102,20 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // Appliquer la sécurité (helmet, rate limiting, etc.)
 appliquerSecurite(app);
 
-// Logging des requêtes (en développement)
-if (process.env.NODE_ENV === 'development') {
-  app.use((req, res, next) => {
-    const start = Date.now();
-    res.on('finish', () => {
-      const duration = Date.now() - start;
-      const emoji = res.statusCode >= 400 ? '🔴' : res.statusCode >= 300 ? '🟠' : '🟢';
-      console.log(`${emoji} ${req.method} ${req.originalUrl} → ${res.statusCode} (${duration} ms)`);
-    });
-    next();
+// Logging des requêtes (adapté à l'environnement)
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    const emoji = res.statusCode >= 400 ? '🔴' : res.statusCode >= 300 ? '🟠' : '🟢';
+    const env = isProduction ? '' : ` (${duration} ms)`;
+    console.log(`${emoji} ${req.method} ${req.originalUrl} → ${res.statusCode}${env}`);
   });
-}
+  next();
+});
 
 // ============================================================
-// ROUTES
+// ROUTES (Avec et sans /api pour compatibilité)
 // ============================================================
 
 // Route santé (publique)
@@ -109,10 +129,8 @@ app.get('/api/sante', (_req, res) =>
   })
 );
 
-// Routes authentification (publiques)
+// Routes avec /api (standard)
 app.use('/api/auth', authRoutes);
-
-// Routes protégées
 app.use('/api/clients', clientsRoutes);
 app.use('/api/demandes', demandesRoutes);
 app.use('/api/echantillons', echantillonsRoutes);
@@ -126,8 +144,6 @@ app.use('/api/laboratoires', laboratoiresRoutes);
 app.use('/api/rapports', rapportsRoutes);
 app.use('/api/exports', exportsRoutes);
 app.use('/api/portail-client', portailClientRoutes);
-
-// Routes pages publiques
 app.use('/api/publications', publicationsRoutes);
 app.use('/api/projets', projetsRoutes);
 app.use('/api/evenements', evenementsRoutes);
@@ -137,12 +153,35 @@ app.use('/api/actualites', actualitesRoutes);
 app.use('/api/galerie', galerieRoutes);
 app.use('/api/equipe', equipeRoutes);
 app.use('/api/faq', faqRoutes);
-
-// Route upload Cloudinary
 app.use('/api/upload', uploadRoutes);
-
-// Route banque de données
 app.use('/api/banque', banqueRoutes);
+
+// ✅ Routes sans /api (pour compatibilité avec les anciennes URL)
+app.use('/auth', authRoutes);
+app.use('/clients', clientsRoutes);
+app.use('/demandes', demandesRoutes);
+app.use('/echantillons', echantillonsRoutes);
+app.use('/analyses', analysesRoutes);
+app.use('/resultats', resultatsRoutes);
+app.use('/stocks', stocksRoutes);
+app.use('/factures', facturesRoutes);
+app.use('/equipements', equipementsRoutes);
+app.use('/dashboard', dashboardRoutes);
+app.use('/laboratoires', laboratoiresRoutes);
+app.use('/rapports', rapportsRoutes);
+app.use('/exports', exportsRoutes);
+app.use('/portail-client', portailClientRoutes);
+app.use('/publications', publicationsRoutes);
+app.use('/projets', projetsRoutes);
+app.use('/evenements', evenementsRoutes);
+app.use('/carrieres', carrieresRoutes);
+app.use('/partenaires', partenairesRoutes);
+app.use('/actualites', actualitesRoutes);
+app.use('/galerie', galerieRoutes);
+app.use('/equipe', equipeRoutes);
+app.use('/faq', faqRoutes);
+app.use('/upload', uploadRoutes);
+app.use('/banque', banqueRoutes);
 
 // ============================================================
 // GESTION DES ERREURS
@@ -164,6 +203,7 @@ const serveur = app.listen(PORT, HOST, () => {
   console.log(`\n🚀 API ICERD démarrée sur le port ${PORT}`);
   console.log(`📊 Environnement: ${process.env.NODE_ENV || 'development'}`);
   console.log(`📍 URL: http://localhost:${PORT}`);
+  console.log(`🌐 CORS: ${isProduction ? '🔒 Production (restreint)' : '🔓 Développement (ouvert)'}`);
   console.log(`📅 ${new Date().toLocaleString('fr-FR')}\n`);
 });
 
