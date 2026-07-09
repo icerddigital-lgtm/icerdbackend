@@ -1,5 +1,6 @@
 // backend/src/routes/analyses.js
 import { Router } from 'express';
+import { langueDe, appliquerLangueListe } from '../utils/langue.js';
 import { q } from '../db.js';
 import { authRequis, roles } from '../middleware/auth.js';
 
@@ -15,7 +16,7 @@ r.get('/catalogue', async (req, res, next) => {
        WHERE ta.actif 
        ORDER BY ta.matrice, ta.categorie, ta.nom`
     );
-    res.json(rows);
+    res.json(appliquerLangueListe(rows, langueDe(req)));
   } catch (e) { 
     next(e); 
   }

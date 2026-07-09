@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import { q } from '../db.js';
 import { authRequis, roles } from '../middleware/auth.js';
+import { langueDe, appliquerLangue, appliquerLangueListe } from '../utils/langue.js';
 
 const r = Router();
 
@@ -29,7 +30,7 @@ r.get('/', async (req, res, next) => {
     query += ` ORDER BY f.ordre_affichage ASC, f.id ASC`;
     
     const { rows } = await q(query, params);
-    res.json(rows);
+    res.json(appliquerLangueListe(rows, langueDe(req)));
   } catch (e) { next(e); }
 });
 
@@ -43,7 +44,7 @@ r.get('/categories', async (req, res, next) => {
        GROUP BY categorie
        ORDER BY categorie`
     );
-    res.json(rows);
+    res.json(appliquerLangueListe(rows, langueDe(req)));
   } catch (e) { next(e); }
 });
 
@@ -60,7 +61,7 @@ r.get('/:id', async (req, res, next) => {
     if (rows.length === 0) {
       return res.status(404).json({ erreur: 'Question non trouvée' });
     }
-    res.json(rows[0]);
+    res.json(appliquerLangue(rows[0], langueDe(req)));
   } catch (e) { next(e); }
 });
 
@@ -73,17 +74,18 @@ r.use(authRequis);
 // POST /api/faq - Créer une question (admin)
 r.post('/', roles('ADMIN', 'DIRECTION', 'COMMERCIAL'), async (req, res, next) => {
   try {
-    const { question, reponse, categorie, ordre_affichage } = req.body;
+    const { question, reponse, categorie, ordre_affichage, question_en, reponse_en } = req.body;
     
     if (!question || !reponse) {
       return res.status(400).json({ erreur: 'La question et la réponse sont obligatoires' });
     }
 
     const { rows } = await q(
-      `INSERT INTO faq (question, reponse, categorie, ordre_affichage, auteur_id, publie)
-       VALUES ($1, $2, $3, $4, $5, true)
+      `INSERT INTO faq (question, reponse, question_en, reponse_en, categorie, ordre_affichage, auteur_id, publie)
+       VALUES ($1, $2, NULLIF($3,''), NULLIF($4,''), $5, $6, $7, true)
        RETURNING *`,
-      [question, reponse, categorie || 'Général', ordre_affichage || 0, req.utilisateur.id]
+      [question, reponse, question_en || '', reponse_en || '',
+       categorie || 'Général', ordre_affichage || 0, req.utilisateur.id]
     );
     res.status(201).json(rows[0]);
   } catch (e) { next(e); }
@@ -92,8 +94,11 @@ r.post('/', roles('ADMIN', 'DIRECTION', 'COMMERCIAL'), async (req, res, next) =>
 // PATCH /api/faq/:id - Modifier une question (admin)
 r.patch('/:id', roles('ADMIN', 'DIRECTION'), async (req, res, next) => {
   try {
-    const { question, reponse, categorie, ordre_affichage, publie } = req.body;
+    const { question, reponse, categorie, ordre_affichage, publie,
+            question_en, reponse_en } = req.body;
     
+    // NULLIF : une traduction effacée dans le portail redevient NULL
+    // → le site public affiche de nouveau le français.
     const { rows } = await q(
       `UPDATE faq SET
          question = COALESCE($1, question),
@@ -101,16 +106,19 @@ r.patch('/:id', roles('ADMIN', 'DIRECTION'), async (req, res, next) => {
          categorie = COALESCE($3, categorie),
          ordre_affichage = COALESCE($4, ordre_affichage),
          publie = COALESCE($5, publie),
+         question_en = CASE WHEN $7::text IS NULL THEN question_en ELSE NULLIF($7,'') END,
+         reponse_en  = CASE WHEN $8::text IS NULL THEN reponse_en  ELSE NULLIF($8,'') END,
          date_modification = NOW()
        WHERE id = $6
        RETURNING *`,
-      [question, reponse, categorie, ordre_affichage, publie, req.params.id]
+      [question, reponse, categorie, ordre_affichage, publie, req.params.id,
+       question_en ?? null, reponse_en ?? null]
     );
     
     if (rows.length === 0) {
       return res.status(404).json({ erreur: 'Question non trouvée' });
     }
-    res.json(rows[0]);
+    res.json(appliquerLangue(rows[0], langueDe(req)));
   } catch (e) { next(e); }
 });
 

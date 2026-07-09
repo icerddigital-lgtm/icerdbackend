@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import { q } from '../db.js';
 import { authRequis, roles } from '../middleware/auth.js';
+import { langueDe, appliquerLangue, appliquerLangueListe } from '../utils/langue.js';
 
 const r = Router();
 
@@ -15,7 +16,7 @@ r.get('/', async (req, res, next) => {
        WHERE p.publie = true
        ORDER BY p.date_debut DESC`
     );
-    res.json(rows);
+    res.json(appliquerLangueListe(rows, langueDe(req)));
   } catch (e) { next(e); }
 });
 
@@ -30,7 +31,7 @@ r.get('/:id', async (req, res, next) => {
       [req.params.id]
     );
     if (rows.length === 0) return res.status(404).json({ erreur: 'Projet non trouvé' });
-    res.json(rows[0]);
+    res.json(appliquerLangue(rows[0], langueDe(req)));
   } catch (e) { next(e); }
 });
 
@@ -70,7 +71,7 @@ r.patch('/:id', roles('ADMIN', 'DIRECTION'), async (req, res, next) => {
       [titre, statut, financement, description, image_url, date_debut, date_fin, publie, req.params.id]
     );
     if (rows.length === 0) return res.status(404).json({ erreur: 'Projet non trouvé' });
-    res.json(rows[0]);
+    res.json(appliquerLangue(rows[0], langueDe(req)));
   } catch (e) { next(e); }
 });
 
