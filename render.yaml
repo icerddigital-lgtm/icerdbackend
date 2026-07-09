@@ -1,0 +1,21 @@
+# render.yaml
+services:
+  - type: web
+    name: icerd-backend
+    runtime: node
+    repo: https://github.com/votre-username/icerd-platform.git
+    buildCommand: cd backend && npm install
+    startCommand: cd backend && npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: CORS_ORIGIN
+        value: https://votre-frontend.netlify.app
+      - key: API_URL
+        value: https://icerd-backend.onrender.com
