@@ -2,7 +2,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { q } from '../db.js';
+import { q, pool } from '../db.js';
 import { authRequis, roles, ROLES } from '../middleware/auth.js';
 import { limiteurConnexion } from '../middleware/securite.js';
 
@@ -15,7 +15,6 @@ r.post('/connexion', limiteurConnexion, async (req, res, next) => {
   try {
     const { email, mot_de_passe } = req.body;
     
-    // Validation des champs requis
     if (!email || !mot_de_passe) {
       return res.status(400).json({ 
         erreur: 'Email et mot de passe requis' 
@@ -23,8 +22,10 @@ r.post('/connexion', limiteurConnexion, async (req, res, next) => {
     }
 
     const { rows } = await q(
-      `SELECT u.*, r.code AS role FROM utilisateurs u
+      `SELECT u.*, r.code AS role, c.id AS client_id, c.raison_sociale
+       FROM utilisateurs u
        JOIN roles r ON r.id = u.role_id
+       LEFT JOIN clients c ON c.id = u.client_id
        WHERE u.email = $1 AND u.actif = true`, 
       [email.toLowerCase().trim()]
     );
@@ -34,16 +35,14 @@ r.post('/connexion', limiteurConnexion, async (req, res, next) => {
       return res.status(401).json({ erreur: 'Email ou mot de passe incorrect' });
     }
 
-    // Vérifier le mot de passe
     const motDePasseValide = await bcrypt.compare(mot_de_passe, u.mot_de_passe);
     if (!motDePasseValide) {
       return res.status(401).json({ erreur: 'Email ou mot de passe incorrect' });
     }
 
-    // Mettre à jour la dernière connexion
     await q(`UPDATE utilisateurs SET derniere_conn = NOW() WHERE id = $1`, [u.id]);
     
-    // Journaliser la connexion (optionnel - si la table existe)
+    // Journaliser la connexion
     try {
       await q(
         `INSERT INTO audit_log (utilisateur_id, action, table_cible) 
@@ -51,11 +50,9 @@ r.post('/connexion', limiteurConnexion, async (req, res, next) => {
         [u.id]
       );
     } catch (e) {
-      // Ignorer si la table audit_log n'existe pas
-      console.log('ℹ️ Audit log non disponible');
+      // Ignorer si la table n'existe pas
     }
 
-    // Générer le token JWT
     const token = jwt.sign(
       { 
         id: u.id, 
@@ -63,7 +60,8 @@ r.post('/connexion', limiteurConnexion, async (req, res, next) => {
         nom: u.nom,
         prenom: u.prenom || '',
         email: u.email,
-        labo: u.laboratoire_id || null
+        labo: u.laboratoire_id || null,
+        client_id: u.client_id || null
       },
       process.env.JWT_SECRET, 
       { expiresIn: process.env.JWT_EXPIRES || '8h' }
@@ -77,7 +75,9 @@ r.post('/connexion', limiteurConnexion, async (req, res, next) => {
         prenom: u.prenom, 
         email: u.email, 
         role: u.role,
-        telephone: u.telephone || null
+        telephone: u.telephone || null,
+        client_id: u.client_id || null,
+        client_raison_sociale: u.raison_sociale || null
       } 
     });
   } catch (e) { 
@@ -89,25 +89,42 @@ r.post('/connexion', limiteurConnexion, async (req, res, next) => {
 // ============================================================
 // GET /api/auth/moi - Profil de l'utilisateur connecté
 // ============================================================
-r.get('/moi', authRequis, (req, res) => {
-  res.json({
-    id: req.utilisateur.id,
-    nom: req.utilisateur.nom,
-    prenom: req.utilisateur.prenom || '',
-    email: req.utilisateur.email,
-    role: req.utilisateur.role,
-    labo: req.utilisateur.labo || null
-  });
+r.get('/moi', authRequis, async (req, res) => {
+  try {
+    const { rows } = await q(
+      `SELECT u.*, r.code AS role, c.id AS client_id, c.raison_sociale
+       FROM utilisateurs u
+       JOIN roles r ON r.id = u.role_id
+       LEFT JOIN clients c ON c.id = u.client_id
+       WHERE u.id = $1`,
+      [req.utilisateur.id]
+    );
+    
+    const u = rows[0];
+    res.json({
+      id: u.id,
+      nom: u.nom,
+      prenom: u.prenom || '',
+      email: u.email,
+      role: u.role,
+      labo: u.laboratoire_id || null,
+      client_id: u.client_id || null,
+      client_raison_sociale: u.raison_sociale || null
+    });
+  } catch (e) {
+    console.error('❌ Erreur profil:', e);
+    res.status(500).json({ erreur: 'Erreur lors du chargement du profil' });
+  }
 });
 
 // ============================================================
-// POST /api/auth/utilisateurs - Création de compte (admin uniquement)
+// POST /api/auth/utilisateurs - Création de compte (admin)
 // ============================================================
 r.post('/utilisateurs', authRequis, roles(ROLES.ADMIN), async (req, res, next) => {
+  const cx = await pool.connect();
   try {
     const { nom, prenom, email, telephone, mot_de_passe, role_code, laboratoire_id } = req.body;
     
-    // Validation
     if (!nom || !email || !mot_de_passe || !role_code) {
       return res.status(400).json({ 
         erreur: 'Nom, email, mot de passe et rôle sont requis' 
@@ -115,13 +132,17 @@ r.post('/utilisateurs', authRequis, roles(ROLES.ADMIN), async (req, res, next) =
     }
 
     // Vérifier si l'email existe déjà
-    const existant = await q(`SELECT id FROM utilisateurs WHERE email = $1`, [email.toLowerCase().trim()]);
+    const existant = await cx.query(`SELECT id FROM utilisateurs WHERE email = $1`, [email.toLowerCase().trim()]);
     if (existant.rows.length > 0) {
       return res.status(409).json({ erreur: 'Cet email est déjà utilisé' });
     }
 
+    await cx.query('BEGIN');
+    
     const hash = await bcrypt.hash(mot_de_passe, 12);
-    const { rows } = await q(
+    
+    // 1. Créer l'utilisateur
+    const userResult = await cx.query(
       `INSERT INTO utilisateurs (nom, prenom, email, telephone, mot_de_passe, role_id, laboratoire_id, actif)
        VALUES ($1, $2, $3, $4, $5, (SELECT id FROM roles WHERE code = $6), $7, true)
        RETURNING id, nom, prenom, email, telephone`,
@@ -136,18 +157,57 @@ r.post('/utilisateurs', authRequis, roles(ROLES.ADMIN), async (req, res, next) =
       ]
     );
     
+    const user = userResult.rows[0];
+    let clientId = null;
+    let client = null;
+    
+    // 2. Si le rôle est CLIENT, créer automatiquement le client associé
+    if (role_code.toUpperCase() === 'CLIENT') {
+      const clientResult = await cx.query(
+        `INSERT INTO clients (code, raison_sociale, contact_nom, email, telephone, type, utilisateur_id)
+         VALUES (
+           genere_numero('CLI','seq_client'),
+           COALESCE($1, $2 || ' ' || $3),
+           $2 || ' ' || $3,
+           $4,
+           $5,
+           'PARTICULIER',
+           $6
+         )
+         RETURNING id, code, raison_sociale`,
+        [nom.trim(), prenom?.trim() || '', nom.trim(), email.toLowerCase().trim(), telephone || null, user.id]
+      );
+      clientId = clientResult.rows[0].id;
+      client = clientResult.rows[0];
+      
+      // Mettre à jour l'utilisateur avec le client_id
+      await cx.query(
+        `UPDATE utilisateurs SET client_id = $1 WHERE id = $2`,
+        [clientId, user.id]
+      );
+    }
+    
+    await cx.query('COMMIT');
+    
     res.status(201).json({
-      message: 'Utilisateur créé avec succès',
-      utilisateur: rows[0]
+      message: '✅ Utilisateur créé avec succès',
+      utilisateur: { 
+        ...user, 
+        client_id: clientId || null 
+      },
+      client: client || null
     });
-  } catch (e) { 
+  } catch (e) {
+    await cx.query('ROLLBACK');
     console.error('❌ Erreur création utilisateur:', e);
-    next(e); 
+    next(e);
+  } finally {
+    cx.release();
   }
 });
 
 // ============================================================
-// GET /api/auth/utilisateurs - Liste des utilisateurs (admin uniquement)
+// GET /api/auth/utilisateurs - Liste des utilisateurs
 // ============================================================
 r.get('/utilisateurs', authRequis, roles(ROLES.ADMIN), async (req, res, next) => {
   try {
@@ -161,13 +221,16 @@ r.get('/utilisateurs', authRequis, roles(ROLES.ADMIN), async (req, res, next) =>
          u.actif, 
          u.cree_le, 
          u.derniere_conn,
+         u.client_id,
          r.code AS role_code, 
          r.id AS role_id, 
          l.code AS laboratoire_code,
-         l.nom AS laboratoire_nom
+         l.nom AS laboratoire_nom,
+         c.raison_sociale AS client_raison_sociale
        FROM utilisateurs u
        JOIN roles r ON r.id = u.role_id
        LEFT JOIN laboratoires l ON l.id = u.laboratoire_id
+       LEFT JOIN clients c ON c.id = u.client_id
        ORDER BY u.cree_le DESC`
     );
     res.json(rows);
@@ -178,18 +241,21 @@ r.get('/utilisateurs', authRequis, roles(ROLES.ADMIN), async (req, res, next) =>
 });
 
 // ============================================================
-// GET /api/auth/utilisateurs/:id - Détail d'un utilisateur (admin uniquement)
+// GET /api/auth/utilisateurs/:id - Détail d'un utilisateur
 // ============================================================
 r.get('/utilisateurs/:id', authRequis, roles(ROLES.ADMIN), async (req, res, next) => {
   try {
     const { rows } = await q(
       `SELECT 
          u.id, u.nom, u.prenom, u.email, u.telephone, u.actif, u.cree_le, u.derniere_conn,
+         u.client_id,
          r.code AS role_code, r.id AS role_id,
-         l.code AS laboratoire_code, l.nom AS laboratoire_nom
+         l.code AS laboratoire_code, l.nom AS laboratoire_nom,
+         c.raison_sociale AS client_raison_sociale
        FROM utilisateurs u
        JOIN roles r ON r.id = u.role_id
        LEFT JOIN laboratoires l ON l.id = u.laboratoire_id
+       LEFT JOIN clients c ON c.id = u.client_id
        WHERE u.id = $1`,
       [req.params.id]
     );
@@ -206,7 +272,7 @@ r.get('/utilisateurs/:id', authRequis, roles(ROLES.ADMIN), async (req, res, next
 });
 
 // ============================================================
-// PATCH /api/auth/utilisateurs/:id - Modifier un utilisateur (admin uniquement)
+// PATCH /api/auth/utilisateurs/:id - Modifier un utilisateur
 // ============================================================
 r.patch('/utilisateurs/:id', authRequis, roles(ROLES.ADMIN), async (req, res, next) => {
   try {
@@ -267,11 +333,78 @@ r.patch('/utilisateurs/:id', authRequis, roles(ROLES.ADMIN), async (req, res, ne
 });
 
 // ============================================================
-// DELETE /api/auth/utilisateurs/:id - Supprimer un utilisateur (admin uniquement)
+// PATCH /api/auth/utilisateurs/:id/lier-client - Lier un client à un utilisateur
+// ============================================================
+r.patch('/utilisateurs/:id/lier-client', authRequis, roles(ROLES.ADMIN), async (req, res, next) => {
+  const cx = await pool.connect();
+  try {
+    const { client_id } = req.body;
+    const userId = req.params.id;
+    
+    if (!client_id) {
+      return res.status(400).json({ erreur: 'client_id est requis' });
+    }
+    
+    // Vérifier que l'utilisateur existe
+    const user = await cx.query(`SELECT id, role_id FROM utilisateurs WHERE id = $1`, [userId]);
+    if (user.rows.length === 0) {
+      return res.status(404).json({ erreur: 'Utilisateur non trouvé' });
+    }
+    
+    // Vérifier le rôle
+    const role = await cx.query(`SELECT code FROM roles WHERE id = $1`, [user.rows[0].role_id]);
+    if (role.rows[0].code !== 'CLIENT') {
+      return res.status(400).json({ erreur: 'Seul un utilisateur de rôle CLIENT peut être lié à un client' });
+    }
+    
+    // Vérifier que le client existe
+    const client = await cx.query(`SELECT id FROM clients WHERE id = $1`, [client_id]);
+    if (client.rows.length === 0) {
+      return res.status(404).json({ erreur: 'Client non trouvé' });
+    }
+    
+    // Vérifier que le client n'est pas déjà lié
+    const existing = await cx.query(`SELECT id FROM clients WHERE utilisateur_id = $1`, [userId]);
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ erreur: 'Cet utilisateur est déjà lié à un client' });
+    }
+    
+    await cx.query('BEGIN');
+    
+    // Mettre à jour le client
+    await cx.query(`UPDATE clients SET utilisateur_id = $1 WHERE id = $2`, [userId, client_id]);
+    
+    // Mettre à jour l'utilisateur
+    await cx.query(`UPDATE utilisateurs SET client_id = $1 WHERE id = $2`, [client_id, userId]);
+    
+    // Journaliser
+    await cx.query(
+      `INSERT INTO audit_log (utilisateur_id, action, table_cible, nouvelle_valeur)
+       VALUES ($1, 'LINK_CLIENT', 'utilisateurs', $2)`,
+      [req.utilisateur.id, JSON.stringify({ utilisateur_id: userId, client_id })]
+    );
+    
+    await cx.query('COMMIT');
+    
+    res.json({ 
+      message: 'Client lié avec succès à l\'utilisateur',
+      utilisateur_id: userId,
+      client_id: client_id
+    });
+  } catch (e) {
+    await cx.query('ROLLBACK');
+    console.error('❌ Erreur liaison client-utilisateur:', e);
+    next(e);
+  } finally {
+    cx.release();
+  }
+});
+
+// ============================================================
+// DELETE /api/auth/utilisateurs/:id - Supprimer un utilisateur
 // ============================================================
 r.delete('/utilisateurs/:id', authRequis, roles(ROLES.ADMIN), async (req, res, next) => {
   try {
-    // Vérifier que l'utilisateur existe
     const existant = await q(`SELECT id, email FROM utilisateurs WHERE id = $1`, [req.params.id]);
     if (existant.rows.length === 0) {
       return res.status(404).json({ erreur: 'Utilisateur non trouvé' });
@@ -304,11 +437,10 @@ r.delete('/utilisateurs/:id', authRequis, roles(ROLES.ADMIN), async (req, res, n
 });
 
 // ============================================================
-// POST /api/auth/deconnexion - Déconnexion (frontend uniquement)
+// POST /api/auth/deconnexion - Déconnexion
 // ============================================================
 r.post('/deconnexion', authRequis, async (req, res) => {
   try {
-    // Journaliser la déconnexion (optionnel)
     try {
       await q(
         `INSERT INTO audit_log (utilisateur_id, action, table_cible) 
@@ -316,9 +448,8 @@ r.post('/deconnexion', authRequis, async (req, res) => {
         [req.utilisateur.id]
       );
     } catch (e) {
-      // Ignorer si la table audit_log n'existe pas
+      // Ignorer
     }
-    
     res.json({ message: 'Déconnexion réussie' });
   } catch (e) {
     res.json({ message: 'Déconnexion réussie' });

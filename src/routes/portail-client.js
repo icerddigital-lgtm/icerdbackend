@@ -1,3 +1,4 @@
+// backend/src/routes/portail-client.js
 // ============================================================================
 // PORTAIL CLIENT — le client connecté (rôle CLIENT) ne voit QUE ses données
 // GET  /api/portail-client/mes-demandes     suivi en temps réel
@@ -7,7 +8,7 @@
 // ============================================================================
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
-import { q } from '../db.js';
+import { q, pool } from '../db.js';
 import { authRequis, roles } from '../middleware/auth.js';
 
 const r = Router();
@@ -15,8 +16,17 @@ r.use(authRequis);
 
 // Retrouve la fiche client liée au compte connecté
 async function clientDe(req) {
+  // Utiliser le client_id stocké dans l'utilisateur
+  if (req.utilisateur.client_id) {
+    const { rows } = await q(`SELECT * FROM clients WHERE id = $1`, [req.utilisateur.client_id]);
+    if (rows[0]) return rows[0];
+  }
+  
+  // Fallback: chercher par utilisateur_id
   const { rows } = await q(`SELECT * FROM clients WHERE utilisateur_id = $1`, [req.utilisateur.id]);
-  if (!rows[0]) throw Object.assign(new Error("Aucune fiche client n'est liée à votre compte. Contactez ICERD."), { status: 404 });
+  if (!rows[0]) {
+    throw Object.assign(new Error("Aucune fiche client n'est liée à votre compte. Contactez ICERD."), { status: 404 });
+  }
   return rows[0];
 }
 
@@ -71,8 +81,7 @@ r.get('/mes-factures', roles('CLIENT'), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// --- Rapports émis (le PDF se télécharge via /api/rapports/demande/:id/pdf,
-//     dont le contrôle d'accès vérifie déjà l'appartenance au client)
+// --- Rapports émis (le PDF se télécharge via /api/rapports/demande/:id/pdf)
 r.get('/mes-rapports', roles('CLIENT'), async (req, res, next) => {
   try {
     const client = await clientDe(req);
@@ -87,20 +96,59 @@ r.get('/mes-rapports', roles('CLIENT'), async (req, res, next) => {
 
 // --- Création du compte portail d'un client (par le personnel ICERD)
 r.post('/comptes', roles('ADMIN','DIRECTION','COMMERCIAL'), async (req, res, next) => {
+  const cx = await pool.connect();
   try {
     const { client_id, email, mot_de_passe } = req.body;
-    const client = (await q(`SELECT * FROM clients WHERE id = $1`, [client_id])).rows[0];
+    
+    if (!client_id || !email || !mot_de_passe) {
+      return res.status(400).json({ erreur: 'client_id, email et mot de passe sont requis' });
+    }
+    
+    const client = (await cx.query(`SELECT * FROM clients WHERE id = $1`, [client_id])).rows[0];
     if (!client) return res.status(404).json({ erreur: 'Client introuvable' });
     if (client.utilisateur_id) return res.status(409).json({ erreur: 'Ce client possède déjà un compte portail' });
 
+    // Vérifier si l'email existe déjà
+    const existant = await cx.query(`SELECT id FROM utilisateurs WHERE email = $1`, [email.toLowerCase().trim()]);
+    if (existant.rows.length > 0) {
+      return res.status(409).json({ erreur: 'Cet email est déjà utilisé' });
+    }
+
+    await cx.query('BEGIN');
+    
     const hash = await bcrypt.hash(mot_de_passe, 12);
-    const u = (await q(
-      `INSERT INTO utilisateurs (nom, prenom, email, mot_de_passe, role_id)
-       VALUES ($1, 'Portail', $2, $3, (SELECT id FROM roles WHERE code = 'CLIENT'))
-       RETURNING id, email`, [client.raison_sociale.slice(0, 80), email, hash])).rows[0];
-    await q(`UPDATE clients SET utilisateur_id = $1 WHERE id = $2`, [u.id, client_id]);
-    res.status(201).json({ message: 'Compte portail client créé', email: u.email, client: client.raison_sociale });
-  } catch (e) { next(e); }
+    const u = (await cx.query(
+      `INSERT INTO utilisateurs (nom, prenom, email, telephone, mot_de_passe, role_id, client_id, actif)
+       VALUES ($1, $2, $3, $4, $5, (SELECT id FROM roles WHERE code = 'CLIENT'), $6, true)
+       RETURNING id, email`,
+      [client.raison_sociale.slice(0, 80), '', email.toLowerCase().trim(), client.telephone || null, hash, client.id]
+    )).rows[0];
+    
+    await cx.query(`UPDATE clients SET utilisateur_id = $1 WHERE id = $2`, [u.id, client_id]);
+    
+    // Journaliser
+    await cx.query(
+      `INSERT INTO audit_log (utilisateur_id, action, table_cible, nouvelle_valeur)
+       VALUES ($1, 'CREATE_CLIENT_ACCOUNT', 'utilisateurs', $2)`,
+      [req.utilisateur.id, JSON.stringify({ client_id, utilisateur_id: u.id, email: u.email })]
+    );
+    
+    await cx.query('COMMIT');
+    
+    res.status(201).json({ 
+      message: '✅ Compte portail client créé', 
+      email: u.email, 
+      client: client.raison_sociale,
+      utilisateur_id: u.id,
+      client_id: client.id
+    });
+  } catch (e) {
+    await cx.query('ROLLBACK');
+    console.error('❌ Erreur création compte client:', e);
+    next(e);
+  } finally {
+    cx.release();
+  }
 });
 
 export default r;
